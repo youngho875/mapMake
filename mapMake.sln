@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.28701.123
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "mapMake", "mapMake.vcxproj", "{A56199E1-7A3B-49D8-AB66-475740D245BD}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A56199E1-7A3B-49D8-AB66-475740D245BD}.Debug|x64.ActiveCfg = Debug|x64
+		{A56199E1-7A3B-49D8-AB66-475740D245BD}.Debug|x64.Build.0 = Debug|x64
+		{A56199E1-7A3B-49D8-AB66-475740D245BD}.Release|x64.ActiveCfg = Release|x64
+		{A56199E1-7A3B-49D8-AB66-475740D245BD}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {4F06798E-176F-42C6-BD25-E95DFC72AFBD}
+	EndGlobalSection
+EndGlobal
