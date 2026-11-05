@@ -155,6 +155,7 @@ void MergeShape(const MergeGroup& group,const fs::path& file,const TileOptions& 
 #include "MergeStylePackage.inc"
 #include "RasterPreflight.inc"
 TileResult MakeTiles(const std::vector<Layer>& layers,const TileOptions& options,std::atomic_bool& cancel,const std::function<void(const std::string&)>& progress,const TileProgress& numeric){
+ if(options.terrainRgb)return MakeRasterTiles(layers,options,cancel,progress,numeric);
  if(options.elevation)return MakeElevationTiles(layers,options,cancel,progress,numeric);
  if(layers.empty())throw std::runtime_error("Select data files");bool raster=layers.front().type=="RASTER";auto create=raster?MakeRasterTiles:MakeVectorTiles;if(!options.merge){auto result=create(layers,options,cancel,progress,numeric);if(!raster&&!result.cancelled){std::vector<MergeGroup> individual;for(auto& l:layers){auto one=MergeGroups({l},false);one.front().code=l.local.stem().u8string();individual.push_back(one.front());}PackageMergeStyles(individual,result);}return result;}
  Runtime(options.gdalDll);fs::create_directories(options.output);auto root=options.output/("_merge_"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));fs::create_directory(root);struct Cleanup{fs::path p;~Cleanup(){std::error_code ec;fs::remove_all(p,ec);}} cleanup{root};

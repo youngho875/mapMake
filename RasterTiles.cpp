@@ -1,4 +1,4 @@
-﻿#include "RasterTiles.h"
+#include "RasterTiles.h"
 #include <windows.h>
 #include <gdal_priv.h>
 #include <gdal_utils.h>
@@ -101,6 +101,7 @@ TileResult MakeVectorTiles(const std::vector<Layer>& layers,const TileOptions& o
 
 TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& opt,std::atomic_bool& cancel,const std::function<void(const std::string&)>& progress,const TileProgress& numeric){
     if(opt.minZoom<0||opt.minZoom>24||(!opt.autoZoom&&(opt.maxZoom>24||opt.maxZoom<opt.minZoom))||opt.maxTiles==0)throw std::runtime_error("Invalid zoom range (0..24) or tile limit.");
+    if(opt.terrainRgb&&opt.jpeg)throw std::runtime_error("Elevation encoding requires lossless PNG");
     if(layers.empty())throw std::runtime_error("Check raster files first.");Runtime(opt.gdalDll);
     CPLSetThreadLocalConfigOption("GDAL_PAM_ENABLED","NO");
     struct Reset{~Reset(){CPLSetThreadLocalConfigOption("GDAL_PAM_ENABLED",nullptr);}} reset;
@@ -117,11 +118,19 @@ TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& o
         double transform[6];if(source->GetGeoTransform(transform)!=CE_None)throw std::runtime_error("Raster has no geotransform. Georeference it first.");
         bool hasCrs=source->GetSpatialRef()!=nullptr;if(!hasCrs&&opt.fallbackEpsg<=0)throw std::runtime_error("Raster CRS is missing. Enter its EPSG in the tile dialog.");
         int bands=source->GetRasterCount();if(!bands)throw std::runtime_error("Raster has no bands.");
-        Args normalization{"-of","VRT","-ot","Byte"};
+        if(opt.terrainRgb&&bands!=1)throw std::runtime_error("Elevation input must have one band");
+        int present=0;
+        double elevationScale=source->GetRasterBand(1)->GetScale(&present);if(!present)elevationScale=1;
+        double elevationOffset=source->GetRasterBand(1)->GetOffset(&present);if(!present)elevationOffset=0;
+        std::string unit=source->GetRasterBand(1)->GetUnitType();
+        double metres=(unit=="ft"||unit=="foot"||unit=="feet")?0.3048:1;
+        if(opt.terrainRgb&&!unit.empty()&&metres==1&&unit!="m"&&unit!="metre"&&unit!="meter")
+            throw std::runtime_error("Unsupported elevation unit: "+unit);
+        Args normalization{"-of","VRT","-ot",opt.terrainRgb?"Float64":"Byte"};
         if(!hasCrs){normalization.strings.push_back("-a_srs");normalization.strings.push_back("EPSG:"+std::to_string(opt.fallbackEpsg));}
-        if(source->GetRasterBand(1)->GetColorTable()){normalization.strings.insert(normalization.strings.end(),{"-expand","rgba"});}
+        if(!opt.terrainRgb&&source->GetRasterBand(1)->GetColorTable()){normalization.strings.insert(normalization.strings.end(),{"-expand","rgba"});}
         else if(bands>4){normalization.strings.insert(normalization.strings.end(),{"-b","1","-b","2","-b","3"});}
-        if(source->GetRasterBand(1)->GetRasterDataType()!=GDT_Byte)normalization.strings.push_back("-scale");
+        if(!opt.terrainRgb&&source->GetRasterBand(1)->GetRasterDataType()!=GDT_Byte)normalization.strings.push_back("-scale");
         auto translateOptions=GDALTranslateOptionsNew(normalization.get(),nullptr);GDALTranslateOptionsSetProgress(translateOptions,Progress,&cancel);
         auto normalized=Own(GDALTranslate("",source.get(),translateOptions,nullptr));GDALTranslateOptionsFree(translateOptions);
         if(!normalized)throw std::runtime_error("Raster normalization failed: "+std::string(CPLGetLastErrorMsg()));
@@ -137,6 +146,10 @@ TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& o
         if(opt.autoZoom){double latitude=atan(sinh((extent[1]+extent[3])*0.5/(World/3.141592653589793)))*180/3.141592653589793;
             maxZoom=std::max(opt.minZoom,ZoomForScale(opt.targetScale,latitude));
             result.messages.push_back(layer.local.u8string()+": scale 1:"+Number(opt.targetScale)+", zoom "+std::to_string(opt.minZoom)+".."+std::to_string(maxZoom)+" (96 DPI)");}
+        if(opt.terrainRgb&&opt.autoZoom){
+            double resolution=std::max(std::abs(geo[1]),std::abs(geo[5]));
+            if(resolution>0)maxZoom=std::max(opt.minZoom,std::min(maxZoom,(int)std::ceil(std::log2(2*World/(256*resolution)))));
+        }
         std::vector<Range> ranges;uint64_t count=0;
         for(int z=opt.minZoom;z<=maxZoom;++z){int64_t n=1LL<<z;double span=2*World/n;
             auto clamp=[&](double v){return std::clamp((int64_t)std::floor(v),(int64_t)0,n-1);};
@@ -146,6 +159,7 @@ TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& o
         if(count>opt.maxTiles-planned)throw std::runtime_error("Tile limit exceeded: this file="+std::to_string(count)+", already planned="+std::to_string(planned)+", limit="+std::to_string(opt.maxTiles)+", max zoom="+std::to_string(maxZoom)+". Increase target scale denominator, reduce max zoom, or raise tile limit.");planned+=count;
         auto safeName=layer.local.stem().u8string();for(auto& c:safeName)if((unsigned char)c<32||std::string("<>:\"/\\|?*").find(c)!=std::string::npos)c='_';
         auto folder=result.folder/(std::to_string(index)+"_"+safeName);fs::create_directories(folder);
+        if(opt.terrainRgb){std::ofstream marker(folder/".terrain-rgb");marker<<"TerrainRGB/1\n";if(!marker)throw std::runtime_error("Cannot write terrain marker");}
         uint64_t done=0;if(numeric)numeric(index,layers.size(),done,count);
         for(const auto& range:ranges){double span=2*World/(1LL<<range.z);
           for(int64_t x=range.x0;x<=range.x1&&!cancel;++x)for(int64_t y=range.y0;y<=range.y1&&!cancel;++y){
@@ -153,13 +167,35 @@ TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& o
             try
             {
             double xmin=-World+x*span,ymax=World-y*span;
-            Args warp{"-of","MEM","-t_srs","EPSG:3857","-te",Number(xmin),Number(ymax-span),Number(xmin+span),Number(ymax),"-ts","256","256","-r","average","-dstalpha","-ot","Byte","-wm","64","-ovr","AUTO"};
+            Args warp{"-of","MEM","-t_srs","EPSG:3857","-te",Number(xmin),Number(ymax-span),Number(xmin+span),Number(ymax),"-ts","256","256","-r","average","-dstalpha","-ot",opt.terrainRgb?"Float64":"Byte","-wm","64","-ovr","AUTO"};
             auto opts=GDALWarpAppOptionsNew(warp.get(),nullptr);GDALWarpAppOptionsSetProgress(opts,Progress,&cancel);GDALDatasetH src=normalized.get();
             auto tile=Own(GDALWarp("",nullptr,1,&src,opts,nullptr));GDALWarpAppOptionsFree(opts);if(cancel)break;
             if(!tile)throw std::runtime_error("Tile warp failed: "+std::string(CPLGetLastErrorMsg()));
             std::vector<unsigned char> alpha(256*256);if(tile->GetRasterBand(tile->GetRasterCount())->RasterIO(GF_Read,0,0,256,256,alpha.data(),256,256,GDT_Byte,0,0)!=CE_None)throw std::runtime_error("Cannot read tile alpha.");
             ++done;if(numeric)numeric(index,layers.size(),done,count);if(std::none_of(alpha.begin(),alpha.end(),[](unsigned char a){return a!=0;})){++result.empty;continue;}
             Dataset rgb=Own(nullptr);GDALDataset* output=tile.get();
+            if(opt.terrainRgb){
+                std::vector<double> heights(256*256);
+                if(tile->GetRasterBand(1)->RasterIO(GF_Read,0,0,256,256,heights.data(),256,256,GDT_Float64,0,0)!=CE_None)
+                    throw std::runtime_error("Cannot read elevation values");
+                rgb=Own(GetGDALDriverManager()->GetDriverByName("MEM")->Create("",256,256,4,GDT_Byte,nullptr));
+                if(!rgb)throw std::runtime_error("Cannot allocate encoded tile");
+                std::vector<unsigned char> encoded(256*256*4,0);
+                for(size_t i=0;i<heights.size();++i){
+                    if(!alpha[i]||!std::isfinite(heights[i]))continue;
+                    double h=(heights[i]*elevationScale+elevationOffset)*metres;
+                    if(!std::isfinite(h)||h< -10000||h>1667721.5)throw std::runtime_error("Height outside Terrain-RGB range");
+                    auto value=(unsigned)std::llround((h+10000)*10);
+                    encoded[i*4]=(unsigned char)(value>>16);encoded[i*4+1]=(unsigned char)(value>>8);
+                    encoded[i*4+2]=(unsigned char)value;encoded[i*4+3]=255;
+                }
+                for(int b=1;b<=4;++b){
+                    rgb->GetRasterBand(b)->SetColorInterpretation((GDALColorInterp)(GCI_RedBand+b-1));
+                    if(rgb->GetRasterBand(b)->RasterIO(GF_Write,0,0,256,256,encoded.data()+b-1,256,256,GDT_Byte,4,256*4)!=CE_None)
+                        throw std::runtime_error("Cannot encode PNG channels");
+                }
+                output=rgb.get();
+            }
             if(opt.jpeg){Args a{"-of","MEM"};int colors=tile->GetRasterCount()-1;for(int b=1;b<=std::min(colors,3);++b){a.strings.push_back("-b");a.strings.push_back(std::to_string(b));}
                 auto t=GDALTranslateOptionsNew(a.get(),nullptr);rgb=Own(GDALTranslate("",tile.get(),t,nullptr));GDALTranslateOptionsFree(t);if(!rgb)throw std::runtime_error("Cannot prepare JPEG bands.");output=rgb.get();}
             auto target=folder/std::to_string(range.z)/std::to_string(x)/(std::to_string(y)+(opt.jpeg?".jpg":".png"));fs::create_directories(target.parent_path());partial=target;partial+=".partial";
@@ -197,7 +233,18 @@ TileResult MakeRasterTiles(const std::vector<Layer>& layers,const TileOptions& o
       }catch(const std::exception& error){if(!partial.empty()){std::error_code ec;fs::remove(partial,ec);}if(!cancel){++result.failed;result.messages.push_back(layer.local.u8string()+": "+error.what());}}
     }
     if(!cancel&&numeric)numeric(layers.size(),layers.size(),1,1);
-    result.cancelled=cancel.load();std::ofstream report(result.folder/"result.txt");report<<"XYZ EPSG:3857, 256x256. Each source has a separate folder. PNG preserves alpha; JPEG uses black for uncovered pixels. Non-Byte input is scaled to Byte.\n";
+    if(opt.terrainRgb){
+        auto xml=CPLCreateXMLNode(nullptr,CXT_Element,"BaseMap");
+        CPLSetXMLValue(xml,"Elevation.Path",fs::absolute(result.folder).u8string().c_str());
+        CPLSetXMLValue(xml,"Elevation.visual","false");
+        CPLSetXMLValue(xml,"Elevation.Format","TerrainRGB");
+        CPLSetXMLValue(xml,"Elevation.VerticalReference","source");
+        if(!CPLSerializeXMLTreeToFile(xml,(result.folder/"base-map-elevation.xml").u8string().c_str())){CPLDestroyXMLNode(xml);throw std::runtime_error("Cannot write elevation XML");}
+        CPLDestroyXMLNode(xml);
+        std::ofstream info(result.folder/"terrain-rgb-info.txt");
+        info<<"TerrainRGB/1: elevation metres = -10000 + (R*65536+G*256+B)*0.1. Alpha 0=NoData.\nXYZ EPSG:3857, 256px, each source stored separately. Quantization <=0.05m after resampling; original vertical datum retained.\nKeep .terrain-rgb markers with PNG tiles. Point Elevation.Path in base-map.xml here; visual=false by default.\n";
+    }
+    result.cancelled=cancel.load();std::ofstream report(result.folder/"result.txt");report<<"XYZ EPSG:3857, 256x256. Each source has a separate folder. PNG preserves alpha; JPEG uses black for uncovered pixels. TerrainRGB preserves encoded metres at 0.1m; other imagery is scaled to Byte.\n";
     report<<"written="<<result.written<<" empty="<<result.empty<<" failed="<<result.failed<<" cancelled="<<result.cancelled<<"\n";for(const auto& message:result.messages)report<<message<<"\n";
     return result;
 }
