@@ -17,7 +17,8 @@ namespace mm
     };
     struct CopOptions {
         fs::path gssRoot;
-        std::string symbolBaseUrl; // Empty = relative symbols/... URLs.
+        std::string symbolBaseUrl; // HTTP export keeps portable symbols/ assets.
+        fs::path sharedSymbolRoot=fs::u8path("D:/map/styles/symbols"); // PC-wide PNG library.
         int transparency=0; // 0: preserve; 1: magenta key; 2: white key.
     };
     CopProfile LoadCop(const fs::path& path);

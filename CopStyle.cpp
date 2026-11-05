@@ -191,6 +191,59 @@ namespace mm
         {
             warnings.insert(s);
         }
+        // Content-versioned names are independent of scale, input order and GSS location.
+        // Existing files are reused only after comparing their full contents.
+        std::string Publish(const fs::path& source,const std::string& bytes)
+        {
+            if(!options.symbolBaseUrl.empty() || options.sharedSymbolRoot.empty())
+            {
+                std::string relative="symbols/symbol_"+std::to_string(generated.size()+1)+".png";
+                assets.push_back({fs::u8path(relative),bytes});
+                return relative;
+            }
+            unsigned long long hash=14695981039346656037ULL;
+            for(unsigned char ch:bytes){hash^=ch;hash*=1099511628211ULL;}
+            std::string stem=Lower(source.stem().u8string());
+            for(char& ch:stem)
+                if(!((ch>='a'&&ch<='z')||(ch>='A'&&ch<='Z')||(ch>='0'&&ch<='9')||ch=='_'||ch=='-'))ch='_';
+            if(stem.empty())stem="symbol";
+            std::ostringstream filename;
+            filename<<stem<<"_"<<std::hex<<std::setw(16)<<std::setfill('0')<<hash<<".png";
+            auto root=fs::absolute(options.sharedSymbolRoot);
+            fs::create_directories(root);
+            auto target=root/fs::u8path(filename.str());
+            if(fs::exists(target))
+            {
+                std::ifstream in(target,std::ios::binary);
+                std::string existing((std::istreambuf_iterator<char>(in)),{});
+                if(existing!=bytes)throw std::runtime_error("Shared symbol content conflict: "+target.u8string());
+                return target.generic_u8string();
+            }
+            // Publish a complete PNG, never a partially written image.
+            auto temp=target;
+#ifdef _WIN32
+            temp+=L"."+std::to_wstring(GetCurrentProcessId())+L"."+std::to_wstring(GetCurrentThreadId())+L".tmp";
+#else
+            temp+=".tmp";
+#endif
+            try
+            {
+                {std::ofstream out(temp,std::ios::binary|std::ios::trunc);
+                 out.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));out.close();
+                 if(!out)throw std::runtime_error("Cannot write shared symbol: "+temp.u8string());}
+                std::error_code error;
+                fs::rename(temp,target,error);
+                if(error)
+                {
+                    std::ifstream in(target,std::ios::binary);
+                    std::string existing((std::istreambuf_iterator<char>(in)),{});
+                    if(existing!=bytes)throw std::runtime_error("Cannot publish shared symbol: "+error.message());
+                    fs::remove(temp);
+                }
+            }
+            catch(...){std::error_code ignored;fs::remove(temp,ignored);throw;}
+            return target.generic_u8string();
+        }
         std::string Graphic(const std::string& name,const std::string& size="")
         {
             if(name.empty())
@@ -208,18 +261,17 @@ namespace mm
             auto j=generated.find(key);std::string path;
             if(j!=generated.end())path=j->second;else
             {
-                path="symbols/symbol_"+std::to_string(generated.size()+1)+".png";
                 try
                 {
                     if(Lower(i->second.extension().u8string())==".png"){
                         std::ifstream in(i->second,std::ios::binary);std::string bytes((std::istreambuf_iterator<char>(in)),{});
                         if(bytes.size()<8||bytes.compare(0,8,"\x89PNG\r\n\x1a\n",8)!=0)
                             throw std::runtime_error("Invalid PNG signature");
-                        assets.push_back({fs::u8path(path),bytes});
+                        path=Publish(i->second,bytes);
                         if(options.transparency)
                             Warn("PNG alpha preserved; color-key option applies only to BMP: "+name);
                     }else
-                        assets.push_back({fs::u8path(path),BmpToPng(i->second,options.transparency)});
+                        path=Publish(i->second,BmpToPng(i->second,options.transparency));
                     generated[key]=path;
                 }
                 catch(const std::exception& e)
@@ -486,7 +538,10 @@ namespace mm
                 {
                     auto key=Lower(e.path().stem().u8string());
                     if(!c.symbols.emplace(key,e.path()).second)
+                    {
                         c.Warn("DUPLICATE symbol basename: "+key);
+                        c.symbols.emplace(e.path().generic_u8string(),e.path());
+                    }
             }
             auto semantic=options.gssRoot/"GSSXML"/"GSS_STYLE_v1.1.xml";
             if(fs::exists(semantic))
@@ -498,7 +553,12 @@ namespace mm
                     c.gss[A(n,"name")]=n;
             }
         }
+        // Build the complete common image library, including symbols unused at this scale.
+        if(options.symbolBaseUrl.empty()&&!options.sharedSymbolRoot.empty())
+            for(const auto& entry:c.symbols)c.Graphic(entry.first);
         std::vector<Artifact> out;std::ostringstream report;
+        if(options.symbolBaseUrl.empty()&&!options.sharedSymbolRoot.empty())
+            report<<"SHARED SYMBOL DIRECTORY: "<<fs::absolute(options.sharedSymbolRoot).generic_u8string()<<"\n";
         size_t totalRules=0;
         std::set<std::string> usedFiles;
         report<<"COP XML to SLD conversion\nScale bounds and style numbers are taken from XML; validate visual output on the target server.\nOnly checked layers are exported. Duplicate Source values are grouped into one NamedLayer with multiple rules.\nOriginal provider/network settings are not used.\nTransparency mode="<<options.transparency<<" (0 preserve, 1 magenta, 2 white)\n\n";
@@ -685,7 +745,7 @@ namespace mm
         throw
             std::runtime_error("No convertible checked layers. Check styles, source XML and layer selection.");
 
-        report<<"\nTOTAL RULES: "<<totalRules<<"\nSYMBOL FILES: "<<c.assets.size()<<"\n\nREVIEW ITEMS ("<<c.warnings.size()<<")\n";
+        report<<"\nTOTAL RULES: "<<totalRules<<"\nSYMBOL FILES: "<<c.generated.size()<<"\n\nREVIEW ITEMS ("<<c.warnings.size()<<")\n";
         for(const auto& w:c.warnings)
             report<<w<<'\n';
 

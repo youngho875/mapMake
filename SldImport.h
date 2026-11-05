@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "Generator.h"
 #include "XmlOutput.h"
 #include <fstream>
@@ -136,6 +136,18 @@ inline SldImport ImportSld(const std::vector<fs::path>& paths,std::vector<Layer>
                     std::replace(href.begin(),href.end(),'\\','/');auto source=fs::u8path(href);
                     if(source.is_relative())
                         source=paths[i].parent_path()/source;
+                    // Shared PC library stays shared when generating a .map file.
+                    auto common=fs::absolute(fs::u8path("D:/map/styles/symbols")).lexically_normal().generic_u8string()+"/";
+                    auto resolved=fs::absolute(source).lexically_normal().generic_u8string();
+                    auto folded=resolved;
+                    std::transform(folded.begin(),folded.end(),folded.begin(),[](unsigned char c){return c>='A'&&c<='Z'?c+32:c;});
+                    std::transform(common.begin(),common.end(),common.begin(),[](unsigned char c){return c>='A'&&c<='Z'?c+32:c;});
+                    if(folded.compare(0,common.size(),common)==0)
+                    {
+                        if(!fs::is_regular_file(source))throw std::runtime_error("Shared symbol is missing: "+resolved);
+                        e->SetAttribute(key.c_str(),resolved.c_str());
+                        break;
+                    }
                     auto target=fs::path("symbols")/("sld_"+std::to_string(i+1)+"_"+std::to_string(++resource)+source.extension().u8string());
                     result.files.push_back({target,ReadSldFile(source)});
                     e->SetAttribute(key.c_str(),target.generic_u8string().c_str());
