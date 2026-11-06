@@ -11,6 +11,9 @@ struct Layer
     std::string name, type, epsg = "4326", featureId, issue;
     std::vector<std::string> fields;
     std::string sldFile; // Packaged SLD relative to mapfile (MapServer 8.2+).
+    std::string displayName,category,family,localStyleXml;
+    double displayScale=0;
+    bool visible=true;
     std::string rgb; // Empty: default color; nonempty: explicit per-layer override.
 };
 
@@ -25,6 +28,7 @@ struct Settings
     bool wms=true, wfs=false, wmts=true, sld=true;
     std::string mapEpsg="4326", mapUnits="DD", extent="124 33 132 39", rgb="40 110 190";
     std::string serverRoot="/srv/maps/data", mapPath="/srv/maps/mapserver.map";
+    std::string wmtsUrl="http://localhost/mapcache/wmts";
     std::string internalUrl="http://127.0.0.1/cgi-bin/mapserv", publicUrl="http://localhost/cgi-bin/mapserv", cache="/var/cache/mapcache";
 };
 

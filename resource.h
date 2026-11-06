@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #define IDD_MAIN 101
 #define IDC_INPUT 1000
 #define IDC_INPUT_PICK 1001
@@ -125,3 +125,6 @@
 #define IDC_T_PERCENT 1518
 
 #define IDC_T_MERGE 1519
+
+#define IDC_WMTS_URL 1700
+#define IDC_INPUT_HELP 1701

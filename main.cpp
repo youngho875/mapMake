@@ -8,8 +8,10 @@
 #include <stdexcept>
 #include <atomic>
 #include "Generator.h"
+#include "OgcMetadata.h"
 #include "CopDialog.h"
 #include "SldImport.h"
+#include "GeneratedSld.h"
 #include "StyleStudio.h"
 #include "TileDialog.h"
 #include <set>
@@ -123,6 +125,7 @@ public:
         SetDlgItemText(IDC_SERVER_ROOT,L"/srv/maps/data");SetDlgItemText(IDC_MAP_PATH,L"/srv/maps/mapserver.map");
         SetDlgItemText(IDC_INTERNAL,L"http://127.0.0.1/cgi-bin/mapserv");SetDlgItemText(IDC_PUBLIC,L"http://localhost/cgi-bin/mapserv");
         SetDlgItemText(IDC_CACHE,L"/var/cache/mapcache");
+        SetDlgItemText(IDC_WMTS_URL,L"http://localhost/mapcache/wmts");
         SetDlgItemText(IDC_OUTPUT,(fs::current_path()/L"generated").c_str());
         for(int id:{IDC_RECURSIVE,IDC_WMS,IDC_WMTS,IDC_SLD})CheckDlgButton(id,BST_CHECKED);
         GetDlgItem(IDC_WMS)->EnableWindow(FALSE);Busy(false);
@@ -202,7 +205,7 @@ public:
         const auto& l=layers_[static_cast<size_t>(change->iItem)];
         SetDlgItemText(IDC_SOURCE_EPSG,Wide(l.epsg));
         SetDlgItemText(IDC_RGB,Wide(l.rgb.empty()?"40 110 190":l.rgb));
-        auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_FEATURE_ID));combo->ResetContent();
+        auto combo=static_cast<CComboBox*>(GetDlgItem(IDC_FEATURE_ID));combo->ResetContent();combo->AddString(L"");
         for(const auto& f:l.fields)combo->AddString(Wide(f));
         combo->SetWindowText(Wide(l.featureId));
     }
@@ -263,6 +266,23 @@ public:
         SetDlgItemText(IDC_SLD_PATH,display);
         SetDlgItemText(IDC_STATUS,L"선택한 SLD를 우선 적용합니다. MapServer 8.2 이상이 필요하며 레이어 이름 또는 중복 없는 데이터 파일명으로 연결합니다.");
     }
+    afx_msg void InputHelp()
+    {
+        AfxMessageBox(L"입력 폴더: PC에서 검색할 원본 데이터 폴더\n"
+            L"서버 데이터 루트: MapServer에서 같은 원본을 읽는 폴더입니다. 입력 폴더 기준 상대경로가 뒤에 붙습니다.\n"
+            L"예: 입력=D:/map/shp/EAR_100M, 서버 루트=D:/map/shp/EAR_100M → LAP030.shp\n\n"
+            L"서버 .map 경로: 생성한 mapserver.map을 서버에 배치할 경로\n"
+            L"내부 WMS URL: MapCache가 MapServer에 접속하는 주소\n"
+            L"외부 서비스 URL: C4IMap이 WMS/WFS에 접속하는 주소\n"
+            L"외부 WMTS URL: C4IMap이 MapCache에 접속하는 주소(예: http://localhost/mapcache/wmts)\n"
+            L"URL에는 ?map= 등 요청 인수를 넣지 않습니다.\n"
+            L"서버 캐시 경로: MapCache가 생성 타일을 저장하는 서버 폴더\n"
+            L"출력 폴더: 이번 MAP/XML/SLD 생성 결과를 저장할 PC 폴더\n\n"
+            L"WFS ID 필드: 비워 두면 원본 변경 없이 레코드 ID를 자동 사용합니다.\n"
+            L"SLD 생성 체크: 기본 SLD 또는 가져온 XML 기반 SLD를 자동 생성합니다.\n"
+            L"기존 SLD 선택 시 해당 파일을 우선 적용합니다. XML 기반 SLD도 MAP에 자동 연결합니다(MapServer 8.2+).\n"
+            L"생성한 wms/wfs/wmts-sources.xml 중 하나를 ogc-sources.xml로 복사해 사용하세요.",MB_ICONINFORMATION);
+    }
     afx_msg void ClearSld(){sldFiles_.clear();SetDlgItemText(IDC_SLD_PATH,L"");SetDlgItemText(IDC_STATUS,L"기존 SLD 선택을 해제했습니다.");}
     afx_msg void Generate()
     {
@@ -286,10 +306,12 @@ public:
             s.internalUrl=Text(IDC_INTERNAL);
             s.publicUrl=Text(IDC_PUBLIC);
             s.cache=Text(IDC_CACHE);
+            s.wmtsUrl=Text(IDC_WMTS_URL);
             std::vector<mm::Layer> chosen;
             for(int i=0;i<list_.GetItemCount();++i)
                 if(list_.GetCheck(i))
                     chosen.push_back(layers_[static_cast<size_t>(i)]);
+            mm::ApplyOgcMetadata(chosen,copProfiles_);
             auto output=Value(IDC_OUTPUT);
             if(output.IsEmpty())
             throw 
@@ -337,6 +359,9 @@ public:
                         return;
                 }
                 auto styleArtifacts=mm::BuildCop(selection.profiles,copOptions_);
+                auto generatedImport=mm::ImportGeneratedSld(styleArtifacts,chosen);
+                artifacts=mm::Build(s,chosen);
+                artifacts.insert(artifacts.end(),generatedImport.files.begin(),generatedImport.files.end());
                 if(!selection.unmatched.empty())
                 {
                     std::string skipped="XML layers excluded after user confirmation:\r\n";
@@ -347,7 +372,7 @@ public:
                 artifacts.insert(artifacts.end(),styleArtifacts.begin(),styleArtifacts.end());
                 for(auto& artifact:artifacts)
                     if(artifact.name==L"generation-report.txt")
-                        artifact.content+="\nSLD MODE: imported COP XML. See sld-conversion-report.txt. Apply an exported SLD explicitly in the WMS request.\n";
+                        artifact.content+="\nSLD MODE: imported COP XML. See sld-conversion-report.txt. Generated SLD is automatically linked to the MAP (MapServer 8.2+).\n";
             }
             if(externalSld){
                 artifacts.insert(artifacts.end(),imported.files.begin(),imported.files.end());
@@ -403,6 +428,7 @@ BEGIN_MESSAGE_MAP(MainDialog,CDialogEx)
  ON_BN_CLICKED(IDC_WMTS,&MainDialog::Services)
  ON_BN_CLICKED(IDC_WFS,&MainDialog::Services)
  ON_BN_CLICKED(IDC_STYLE_STUDIO,&MainDialog::StyleStudio)
+ ON_BN_CLICKED(IDC_INPUT_HELP,&MainDialog::InputHelp)
  ON_BN_CLICKED(IDC_SLD_PICK,&MainDialog::ChooseSld)
  ON_BN_CLICKED(IDC_SLD_CLEAR,&MainDialog::ClearSld)
  ON_BN_CLICKED(IDC_COLOR_PICK,&MainDialog::PickColor)

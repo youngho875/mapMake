@@ -1,4 +1,5 @@
 ﻿#include "Generator.h"
+#include "OgcHelp.h"
 #include "XmlOutput.h"
 #include <algorithm>
 #include <array>
@@ -327,6 +328,7 @@ std::vector<Artifact> Build(const Settings& s,const std::vector<Layer>& layers)
     if(s.wmts)
     {
         CheckUrl(s.internalUrl);
+        CheckUrl(s.wmtsUrl);
         if(s.cache.empty())
         throw 
             std::runtime_error("Enter a server cache path.");
@@ -373,9 +375,9 @@ std::vector<Artifact> Build(const Settings& s,const std::vector<Layer>& layers)
         if(l.type!="RASTER") 
         {
             hasVector=true;
-            if(s.wfs&&(l.featureId.empty()||std::find(l.fields.begin(),l.fields.end(),l.featureId)==l.fields.end()))
+            if(s.wfs&&!l.featureId.empty()&&std::find(l.fields.begin(),l.fields.end(),l.featureId)==l.fields.end())
             throw
-                std::runtime_error(l.relative.u8string()+": choose an existing DBF unique ID field for WFS.");
+                std::runtime_error(l.relative.u8string()+": Choose an existing DBF ID field, or leave it empty for automatic record IDs.");
         }       
         else if(s.wfs&&!s.wms&&!s.wmts)
         throw
@@ -391,23 +393,42 @@ std::vector<Artifact> Build(const Settings& s,const std::vector<Layer>& layers)
      <<"  IMAGETYPE \"png\"\n  OUTPUTFORMAT\n    NAME \"png\"\n    DRIVER \"AGG/PNG\"\n    MIMETYPE \"image/png\"\n    IMAGEMODE RGBA\n    EXTENSION \"png\"\n    TRANSPARENT ON\n  END\n"
      <<"  SYMBOL\n    NAME \"circle\"\n    TYPE ELLIPSE\n    FILLED TRUE\n    POINTS\n      1 1\n    END\n  END\n  WEB\n    METADATA\n"
      <<"      \"ows_title\" \"mapMake\"\n      \"ows_onlineresource\" "<<Q(online)<<"\n      \"ows_srs\" "<<Q("EPSG:"+s.mapEpsg+" EPSG:3857 EPSG:4326")
-     <<"\n      \"wms_enable_request\" "<<Q(render?"GetCapabilities GetMap":"!*")
+     <<"\n      \"wms_enable_request\" "<<Q(render?"GetCapabilities GetMap GetFeatureInfo":"!*")
+     <<"\n      \"wms_getfeatureinfo_formatlist\" \"application/json\""
      <<"\n      \"wfs_enable_request\" "<<Q(s.wfs?"GetCapabilities DescribeFeatureType GetFeature":"!*")<<"\n    END\n  END\n";
+    if(render)m<<"  OUTPUTFORMAT\n    NAME \"geojson\"\n    DRIVER \"OGR/GEOJSON\"\n    MIMETYPE \"application/json\"\n    FORMATOPTION \"STORAGE=stream\"\n    FORMATOPTION \"FORM=SIMPLE\"\n  END\n";
     cache<<"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<mapcache>\n  <cache name=\"disk\" type=\"disk\"><base>"<<X(s.cache)<<"</base></cache>\n";
     sld<<"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<StyledLayerDescriptor version=\"1.0.0\" xmlns=\"http://www.opengis.net/sld\" xmlns:ogc=\"http://www.opengis.net/ogc\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.opengis.net/sld http://schemas.opengis.net/sld/1.0.0/StyledLayerDescriptor.xsd\">\n";
     manifest<<"mapMake generation report\nWMS="<<s.wms<<" WFS="<<s.wfs<<" WMTS="<<s.wmts<<" SLD="<<s.sld<<"\n";
     if(s.wmts&&!s.wms)manifest<<"WMS is enabled as the source for WMTS. Restrict direct WMS access at the web server if needed.\n";
-    manifest<<"Map CRS: EPSG:"<<s.mapEpsg<<"; extent: "<<s.extent<<"\nRaster formats are selected by suffix; GDAL on the server must support their real content.\nRaster SLD uses the default image appearance (no ColorMap or band remapping).\nWFS ID fields must contain nonempty unique values.\n\n";
+    manifest<<"Map CRS: EPSG:"<<s.mapEpsg<<"; extent: "<<s.extent<<"\nRaster formats are selected by suffix; GDAL on the server must support their real content.\nRaster SLD uses the default image appearance (no ColorMap or band remapping).\nExplicit WFS ID fields must contain nonempty unique values. Empty ID uses a virtual OGR record ID without modifying the source DBF. Record IDs may change after dataset edits/reordering.\n\n";
     for(const auto& l:layers) 
     {
         const auto layerRgb=NormalizeRgb(l.rgb.empty()?s.rgb:l.rgb);
         int r,g,blue;std::istringstream(layerRgb)>>r>>g>>blue;
         auto data=ServerPath(s.serverRoot,l.relative);bool vector=l.type!="RASTER";
-        m<<"  LAYER\n    NAME "<<Q(l.name)<<"\n    TYPE "<<l.type<<"\n    STATUS ON\n    DATA "<<Q(data)<<"\n    PROJECTION\n      "<<Q("init=epsg:"+l.epsg)<<"\n    END\n    METADATA\n"
-         <<"      \"ows_title\" "<<Q(l.relative.generic_u8string())<<"\n      \"wfs_enable_request\" "<<Q(s.wfs&&vector?"GetCapabilities DescribeFeatureType GetFeature":"!*")<<'\n';
+        std::string effectiveId=l.featureId;
+        const bool automaticId=s.wfs&&vector&&effectiveId.empty();
+        m<<"  LAYER\n    NAME "<<Q(l.name)<<"\n    TYPE "<<l.type<<"\n    STATUS ON\n";
+        if(automaticId)
+        {
+            effectiveId="mm_fid";
+            for(unsigned suffix=1;std::any_of(l.fields.begin(),l.fields.end(),[&](const std::string& f){return Lower(f)==Lower(effectiveId);});++suffix)
+                effectiveId="mm_fid_"+std::to_string(suffix);
+            std::string table=l.relative.stem().u8string(),quoted;
+            for(char ch:table){if(ch=='"')quoted+='"';quoted+=ch;}
+            const auto sql="SELECT FID AS "+effectiveId+", * FROM \""+quoted+"\"";
+            m<<"    CONNECTIONTYPE OGR\n    CONNECTION "<<Q(data)<<"\n    DATA "<<Q(sql)<<'\n';
+            manifest<<"AUTO WFS ID: "<<l.name<<" -> "<<effectiveId<<" (OGR FID; original DBF unchanged)\n";
+        }
+        else m<<"    DATA "<<Q(data)<<'\n';
+        m<<"    PROJECTION\n      "<<Q("init=epsg:"+l.epsg)<<"\n    END\n    METADATA\n"
+         <<"      \"ows_title\" "<<Q(l.displayName.empty()?l.relative.generic_u8string():l.displayName)<<"\n      \"wfs_enable_request\" "<<Q(s.wfs&&vector?"GetCapabilities DescribeFeatureType GetFeature":"!*")<<'\n';
         if(!l.sldFile.empty())m<<"      \"SLD_USE_FIRST_NAMEDLAYER\" \"false\"\n";
-        if(s.wfs&&vector)m<<"      \"gml_include_items\" \"all\"\n      \"gml_types\" \"auto\"\n      \"gml_featureid\" "<<Q(l.featureId)<<'\n';
+        if(vector)m<<"      \"gml_include_items\" \"all\"\n      \"gml_types\" \"auto\"\n";
+        if(vector&&!effectiveId.empty())m<<"      \"gml_featureid\" "<<Q(effectiveId)<<'\n';
         m<<"    END\n";
+        if(vector&&render)m<<"    TEMPLATE \"queryable\"\n    TOLERANCE 7\n    TOLERANCEUNITS PIXELS\n";
         if(!l.sldFile.empty())m<<"    STYLEITEM "<<Q("sld://"+l.sldFile)<<'\n';
         if(vector&&l.sldFile.empty()) 
         {
@@ -430,6 +451,45 @@ std::vector<Artifact> Build(const Settings& s,const std::vector<Layer>& layers)
     std::vector<Artifact> out{{"mapserver.map",m.str()}};
     if(s.wmts)out.push_back({"mapcache.xml",PrettyXml(cache.str())});
     if(s.sld)out.push_back({"styles.sld",PrettyXml(sld.str())});
+    // C4IMap profiles are separate so the user chooses one service explicitly.
+    for(const auto& service:std::vector<std::string>{"WMS","WFS","WMTS"})
+    {
+        if((service=="WMS"&&!s.wms)||(service=="WFS"&&!s.wfs)||(service=="WMTS"&&!s.wmts))continue;
+        std::ostringstream xml;
+        xml<<"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MapSources version=\"1\">\n";
+        for(const auto& l:layers)
+        {
+            if(service=="WFS"&&l.type=="RASTER")continue;
+            const auto title=l.displayName.empty()?l.name:l.displayName;
+            xml<<"  <Layer id=\""<<Lower(service)<<"_"<<X(l.name)<<"\" name=\""<<X(title)
+               <<"\" type=\""<<service<<"\" family=\""<<X(l.family.empty()?"지도":l.family)<<"\">\n";
+            auto tag=[&](const char* name,const std::string& value){xml<<"    <"<<name<<">"<<X(value)<<"</"<<name<<">\n";};
+            tag("Category",l.category.empty()?"일반":l.category);
+            tag("Scale",std::to_string(l.displayScale));
+            tag("visual",l.visible?"true":"false");
+            tag("Endpoint",service=="WMTS"?s.wmtsUrl+"?SERVICE=WMTS&REQUEST=GetCapabilities":online);
+            tag("LayerName",l.name);tag("Version","1.1.1");tag("Format","image/png");
+            tag("MinScale","0");tag("MaxScale","0");
+            if(!l.localStyleXml.empty())tag("LocalStyleXML",l.localStyleXml);
+            if(service=="WMTS")
+            {
+                tag("Style","default");tag("TileMatrixSet","GoogleMapsCompatible");
+                if(l.type!="RASTER"){
+                    tag("IdentifyType",s.wfs?"WFS":"WMS");
+                    tag("IdentifyEndpoint",online);tag("IdentifyLayer",l.name);
+                }
+            }
+            xml<<"  </Layer>\n";
+        }
+        xml<<"</MapSources>\n";
+        out.push_back({Lower(service)+"-sources.xml",PrettyXml(xml.str())});
+    }
+    out.push_back({"README-client-xml.txt",
+        "C4IMap: choose wms-sources.xml, wfs-sources.xml or wmts-sources.xml and copy it beside C4IMap.exe as ogc-sources.xml.\n"
+        "Only selected services are exported. WFS excludes raster layers. WMTS uses WFS identify when enabled, otherwise WMS GetFeatureInfo.\n"
+        "Deploy mapserver.map to the configured server map path and mapcache.xml to MapCache. Configure the WMTS URL in Apache; this tool does not configure Apache.\n"
+        "Keep map-sources.xml/local-sources.xml/tile-sources.xml separate. Import a profile from XML map source settings for a temporary switch.\n"});
+    out.push_back({fs::u8path("입력란-설명.txt"),OgcInputHelp()});
     out.push_back({"generation-report.txt",manifest.str()});
     return out;
 }

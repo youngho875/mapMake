@@ -481,8 +481,14 @@ namespace mm
             source=Lower(fs::u8path(source).filename().u8string());
             if(source.size()>4&&source.substr(source.size()-4)==".shp")
                 source.resize(source.size()-4);
+            auto canonical=[](std::string name){
+                name=Lower(name);
+                if(name.size()>4&&name.substr(name.size()-4)=="_tmk")name.resize(name.size()-4);
+                return name;
+            };
+            source=canonical(source);
             for(const auto& d:data)
-                if(d.type!="RASTER"&&Lower(d.local.stem().u8string())==source)
+                if(d.type!="RASTER"&&canonical(d.local.stem().u8string())==source)
                     matches.push_back(d.name);
             layer.target=matches.size()==1?matches.front():layer.source;
         }
